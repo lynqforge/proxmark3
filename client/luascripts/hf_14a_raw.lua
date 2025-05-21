@@ -1,13 +1,38 @@
-local cmds = require('commands')
-local getopt = require('getopt')
-local lib14a = require('read14a')
-local ansicolors  = require('ansicolors')
+--[[
+    hf_14a_raw.lua
+    -----------------
+    This script provides a very small wrapper around the "raw" ISO14443A
+    reader functionality of the Proxmark3 client.  It can be used to send
+    arbitrary APDU frames to a tag and print the responses.  The script is
+    particularly handy for quick tests or when prototyping commands that are
+    not yet supported by the standard client commands.
+
+    It relies on a few helper modules that ship with the Proxmark3 client:
+      * commands   - definitions of command numbers and helpers for constructing
+                     USB frames.
+      * getopt     - simple command line option parser used by many scripts.
+      * read14a    - helper library for basic ISO14443A card interaction
+                     (connecting, disconnecting, etc.).
+      * ansicolors - for colored output in the help text.
+
+    Usage examples and option descriptions can be displayed by running the
+    script with no parameters.  See the long comment at the top of this file for
+    more information on typical workflows.
+]]
+
+local cmds       = require('commands')
+local getopt     = require('getopt')
+local lib14a     = require('read14a')
+local ansicolors = require('ansicolors')
 
 copyright = ''
 author = "Martin Holst Swende"
 version = 'v1.0.2'
+-- Short description shown in the client when listing available scripts
 desc = [[
-This is a script to allow raw 14443a commands to be sent and received.
+Send arbitrary ISO14443A frames to a tag and optionally display the raw
+response.  Useful for low level experimentation or when building new
+functionality.
 ]]
 example = [[
     # 1. Connect and don't disconnect
@@ -74,7 +99,7 @@ local function oops(err)
     return nil, err
 end
 ---
--- Usage help
+--- Print a nicely formatted usage message describing all available options.
 local function help()
     print(copyright)
     print(author)
@@ -88,7 +113,11 @@ local function help()
     print(example)
 end
 ---
--- The main entry point
+-- Entry point when invoked via ``script run hf_14a_raw``.
+-- Parses command line flags, manages the card connection and sends the
+-- optional raw frame to the tag.
+--
+-- @param args  String containing the argument list.
 function main(args)
 
     if args == nil or #args == 0 then return help() end
@@ -133,7 +162,11 @@ function main(args)
             return oops(err)
         end
 
-        if not ignoreresponse then
+        -- Unless the user explicitly asked to ignore it, display the
+        -- response returned from the card.  Note the misspelled variable
+        -- name here is historical; keep the behaviour consistent by
+        -- checking the correctly named one.
+        if not ignore_response then
             -- Display the returned data
             showdata(res)
         end
@@ -147,9 +180,17 @@ end
 --- Picks out and displays the data read from a tag
 -- Specifically, takes a usb packet, converts to a Command
 -- (as in commands.lua), takes the data-array and
--- reads the number of bytes specified in arg1 (arg0 in c-struct)
--- and displays the data
--- @param usbpacket the data received from the device
+---
+-- Parse a raw response USB packet from the Proxmark3 firmware and print
+-- the resulting data bytes.
+--
+-- The firmware encodes the returned bytes as an ASCII hex string in the
+-- ``data`` field of the response.  ``arg1`` contains the length of that
+-- buffer.  This helper extracts exactly ``arg1`` bytes and prints them
+-- prefixed with ``<<`` so that the output resembles the normal client
+-- command output.
+--
+-- @param usbpacket  Raw USB packet returned from ``sendMIX``.
 function showdata(usbpacket)
     local cmd_response = Command.parse(usbpacket)
     local len = tonumber(cmd_response.arg1) *2
@@ -158,25 +199,44 @@ function showdata(usbpacket)
     print("<< ",data)
 end
 
+---
+-- Send a raw ISO14443A frame to the tag.
+--
+-- @param rawdata   Hex string representing the bytes to transmit.
+-- @param options   Table of flags:
+--                   * ignore_response - if true, do not wait for a reply.
+--                   * topaz_mode      - send using Topaz modulation.
+--                   * append_crc      - ask firmware to append CRC.
 function sendRaw(rawdata, options)
+    -- Echo the frame so the user can see exactly what is being sent
     print('>> ', rawdata)
 
-    local flags = lib14a.ISO14A_COMMAND.ISO14A_NO_DISCONNECT + lib14a.ISO14A_COMMAND.ISO14A_RAW
+    -- Build the flag bitmask used by the firmware when interpreting the frame.
+    -- We always request RAW mode and we do not want the firmware to
+    -- automatically deactivate the RF field between commands.
+    local flags = lib14a.ISO14A_COMMAND.ISO14A_NO_DISCONNECT +
+                  lib14a.ISO14A_COMMAND.ISO14A_RAW
 
+    -- Optional behaviour controlled by command line flags
     if options.topaz_mode then
+        -- Switch the reader to Topaz modulation when communicating
         flags = flags + lib14a.ISO14A_COMMAND.ISO14A_TOPAZMODE
     end
     if options.append_crc then
+        -- Let the firmware automatically calculate and append the CRC
         flags = flags + lib14a.ISO14A_COMMAND.ISO14A_APPEND_CRC
     end
 
-    local command = Command:newMIX{cmd = cmds.CMD_HF_ISO14443A_READER,
-                                arg1 = flags, -- Send raw
-                                -- arg2 contains the length, which is half the length
-                                -- of the ASCII-string rawdata
-                                arg2 = string.len(rawdata)/2,
-                                data = rawdata}
-    return  command:sendMIX(options.ignore_response)
+    -- Construct the USB command.  ``arg2`` holds the number of bytes in the
+    -- frame (the firmware expects a byte count, not an ASCII string length).
+    local command = Command:newMIX{
+        cmd  = cmds.CMD_HF_ISO14443A_READER,
+        arg1 = flags,
+        arg2 = string.len(rawdata) / 2,
+        data = rawdata
+    }
+    -- ``sendMIX`` transmits the command and optionally waits for a response.
+    return command:sendMIX(options.ignore_response)
 end
 
 
